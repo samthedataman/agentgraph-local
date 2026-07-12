@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coordinate with AgentGraph"
+  short_description: "Coordinate agents, memory, handoffs, and fleets"
+  default_prompt: "Use $coordinate-agentgraph to inspect live agents, retrieve relevant shared memory, create a safe handoff, or validate an explicitly requested bounded fleet."
