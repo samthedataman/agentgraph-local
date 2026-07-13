@@ -123,10 +123,13 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
     const details = await health();
     checks.push({ name: "daemon", status: "pass", message: "Daemon is responding", details });
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     checks.push({
       name: "daemon",
       status: "fail",
-      message: `Daemon is not responding: ${error instanceof Error ? error.message : String(error)}`
+      message: message.includes("EPERM")
+        ? "Daemon socket access denied. Run this command in your normal user terminal (not a sandbox), then run `agentgraph daemon restart`."
+        : `Daemon is not responding: ${message}`
     });
   }
 

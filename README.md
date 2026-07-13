@@ -141,6 +141,7 @@ From this checkout, run the user-local installer. It avoids `sudo`, global npm p
 ./scripts/install-local.sh
 export PATH="$HOME/.local/bin:$PATH"
 agentgraph setup
+agentgraph daemon start
 agentgraph doctor
 ```
 
