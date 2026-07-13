@@ -133,6 +133,29 @@ Codex, Claude, and an ordinary human-controlled root CLI can invoke these comman
 
 ## Install from this checkout
 
+### Easiest local install
+
+From this checkout, run the user-local installer. It avoids `sudo`, global npm permissions, and aliases:
+
+```sh
+./scripts/install-local.sh
+export PATH="$HOME/.local/bin:$PATH"
+agentgraph setup
+agentgraph doctor
+```
+
+Then start the local daemon and verify the graph:
+
+```sh
+agentgraph daemon start
+agentgraph doctor
+agentgraph ps
+```
+
+Then open normal `codex` and `claude` sessions. The first `ps` may take a few seconds while SQLite presence data is reconciled.
+
+### Developer install
+
 This folder is currently a source checkout, not a published npm package. It is Apache-2.0 licensed, but it has not been pushed to a public Git host or published to npm yet. Until a public URL is chosen, install it locally:
 
 ```sh

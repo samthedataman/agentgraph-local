@@ -65,7 +65,9 @@ export async function run(args: string[], json: boolean): Promise<number> {
   };
 
   const show = async (): Promise<void> => {
-    const processes = await rpc<ProcessPresence[]>("process.list", params);
+    // Presence includes joined session metadata and can briefly wait on a
+    // busy SQLite WAL. This read-only command gets a practical timeout.
+    const processes = await rpc<ProcessPresence[]>("process.list", params, { timeoutMs: 15_000 });
     if (json) writeJson(processes);
     else writeLine(renderTable(processes));
   };
@@ -90,4 +92,3 @@ export async function run(args: string[], json: boolean): Promise<number> {
   });
   return 0;
 }
-
