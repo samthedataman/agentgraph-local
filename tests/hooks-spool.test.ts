@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rename } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -58,6 +58,26 @@ describe("hook delivery", () => {
       delivered.push(item.event_id);
     });
     expect(result).toMatchObject({ delivered: 1, retried: 0, quarantined: 0 });
+    expect(delivered).toHaveLength(1);
+    await expect(readdir(directory)).resolves.toEqual([]);
+  });
+
+  it("recovers a processing claim stranded by a daemon crash", async () => {
+    const send: typeof rpc = async () => {
+      throw new Error("daemon down");
+    };
+    const directory = await mkdtemp(join(tmpdir(), "agentgraph-hooks-"));
+    await ingestHookEvent(event(), { send, directory });
+    const [eventName] = await readdir(directory);
+    expect(eventName).toMatch(/\.event$/);
+    await rename(
+      join(directory, eventName as string),
+      join(directory, (eventName as string).replace(/\.event$/, ".processing"))
+    );
+
+    const delivered: string[] = [];
+    const result = await drainHookSpool(directory, (item) => delivered.push(item.event_id));
+    expect(result).toMatchObject({ delivered: 1, recovered: 1, retried: 0, quarantined: 0 });
     expect(delivered).toHaveLength(1);
     await expect(readdir(directory)).resolves.toEqual([]);
   });

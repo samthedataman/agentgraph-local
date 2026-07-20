@@ -15,6 +15,7 @@ export interface DrainSpoolResult {
   delivered: number;
   retried: number;
   quarantined: number;
+  recovered: number;
 }
 
 const DEFAULT_MAX_FILES = 5_000;
@@ -32,10 +33,35 @@ function safeEventName(eventId: string): string {
 
 async function enforceFileLimit(directory: string, maxFiles: number): Promise<void> {
   const entries = (await readdir(directory, { withFileTypes: true }))
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".event"));
+    .filter((entry) => entry.isFile() && (entry.name.endsWith(".event") || entry.name.endsWith(".processing")));
   if (entries.length >= maxFiles) {
     throw new Error(`Hook spool is full (${entries.length}/${maxFiles} events)`);
   }
+}
+
+async function recoverInterruptedClaims(directory: string): Promise<number> {
+  const names = (await readdir(directory))
+    .filter((name) => name.endsWith(".processing"))
+    .sort();
+  let recovered = 0;
+  for (const name of names) {
+    const processingPath = join(directory, name);
+    const base = name.slice(0, -11);
+    let eventPath = join(directory, `${base}.event`);
+    try {
+      await access(eventPath);
+      eventPath = join(directory, `${base}.recovered-${process.pid}-${recovered}.event`);
+    } catch {
+      // The original event name is available.
+    }
+    try {
+      await rename(processingPath, eventPath);
+      recovered += 1;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return recovered;
 }
 
 /**
@@ -97,11 +123,12 @@ export async function drainHookSpool(
   limit = DEFAULT_MAX_FILES
 ): Promise<DrainSpoolResult> {
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  const recovered = await recoverInterruptedClaims(directory);
   const names = (await readdir(directory))
     .filter((name) => name.endsWith(".event"))
     .sort()
     .slice(0, Math.max(1, limit));
-  const result: DrainSpoolResult = { delivered: 0, retried: 0, quarantined: 0 };
+  const result: DrainSpoolResult = { delivered: 0, retried: 0, quarantined: 0, recovered };
 
   for (const name of names) {
     const eventPath = join(directory, name);

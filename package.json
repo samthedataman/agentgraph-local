@@ -1,6 +1,6 @@
 {
   "name": "agentgraph-local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared presence, memory, handoffs, and bounded cross-provider fleets for coding agents.",
   "type": "module",
   "bin": {

@@ -33,6 +33,7 @@ describe("AgentGraph MCP server", () => {
       const names = tools.tools.map((tool) => tool.name);
       expect(names).toEqual(
         expect.arrayContaining([
+          "session_search",
           "handoff_acknowledge",
           "handoff_claim",
           "handoff_start",

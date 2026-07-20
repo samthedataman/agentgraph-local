@@ -1,6 +1,9 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { once } from "node:events";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentGraphConfig } from "../src/config/config.js";
 import type { AgentGraphPaths } from "../src/config/paths.js";
@@ -95,5 +98,17 @@ describe("Unix socket JSONL RPC", () => {
     const listed = await rpc<ProcessPresence[]>("process.list", {}, { socketPath: paths.socketPath });
     expect(listed).toHaveLength(1);
     expect(listed[0]?.providerSessionId).toBe("claude-session");
+
+    daemon.dispatcher.register("test.delayed", async () => {
+      await delay(30);
+      return { ok: true };
+    });
+    const abandoned = createConnection(paths.socketPath);
+    await once(abandoned, "connect");
+    abandoned.write(`${JSON.stringify({ jsonrpc: "1.0", id: "abandoned", method: "test.delayed" })}\n`);
+    abandoned.destroy();
+    await delay(60);
+    await expect(rpc<{ ok: boolean }>("health", undefined, { socketPath: paths.socketPath }))
+      .resolves.toMatchObject({ ok: true });
   });
 });

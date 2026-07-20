@@ -26,6 +26,36 @@ export interface ListEventsOptions {
   limit?: number;
 }
 
+export interface SessionLookupOptions {
+  provider?: string;
+  repositoryRoot?: string;
+  worktreeRoot?: string;
+}
+
+export interface SearchSessionsOptions extends SessionLookupOptions {
+  query: string;
+  excludeSessionId?: string;
+  limit?: number;
+}
+
+export interface SessionRecord {
+  sessionId: string;
+  provider: string;
+  state: string;
+  label: string | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  cwd: string | null;
+  repositoryRoot: string | null;
+  worktreeRoot: string | null;
+  transcriptPath: string | null;
+  latestPrompt: string | null;
+  latestAssistantMessage: string | null;
+  title: string;
+  matchSnippets: string[];
+  score?: number;
+}
+
 interface ProcessRow {
   id: string;
   run_id: string;
@@ -80,6 +110,16 @@ interface EventRow {
   hop_count: number;
   sensitivity: string;
   projection_version: number;
+}
+
+interface SessionEventRow extends EventRow {
+  session_state: string;
+  session_label: string | null;
+  session_first_seen_at: string;
+  session_last_seen_at: string;
+  process_cwd: string | null;
+  process_repository_root: string | null;
+  process_worktree_root: string | null;
 }
 
 const PROCESS_SELECT = `
@@ -161,6 +201,85 @@ function eventFromRow(row: EventRow): AgentEvent {
     sensitivity: row.sensitivity,
     projection_version: row.projection_version
   };
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function compactSnippet(value: string, maximum = 500): string {
+  const compact = value.replaceAll(/\s+/g, " ").trim();
+  return compact.length <= maximum ? compact : `${compact.slice(0, maximum - 1)}…`;
+}
+
+function sessionFromRows(rows: SessionEventRow[], repositoryFallback?: string): SessionRecord | null {
+  const first = rows[0];
+  if (!first?.provider_session_id) return null;
+  let cwd: string | null = null;
+  let repositoryRoot: string | null = null;
+  let worktreeRoot: string | null = null;
+  let transcriptPath: string | null = null;
+  let latestPrompt: string | null = null;
+  let latestAssistantMessage: string | null = null;
+  const snippets: string[] = [];
+
+  for (const row of rows) {
+    const payload = parseJson<Record<string, unknown>>(row.payload_json, {});
+    cwd ??= nonEmptyString(payload.cwd) ?? nonEmptyString(payload.working_directory) ?? row.process_cwd;
+    repositoryRoot ??= row.process_repository_root ?? repositoryFallback ?? null;
+    worktreeRoot ??= row.process_worktree_root ?? repositoryFallback ?? null;
+    transcriptPath ??= nonEmptyString(payload.transcript_path);
+    const prompt = nonEmptyString(payload.prompt);
+    const assistant = nonEmptyString(payload.last_assistant_message);
+    latestPrompt ??= prompt;
+    latestAssistantMessage ??= assistant;
+    const snippet = prompt ?? assistant;
+    if (snippet && snippets.length < 3) {
+      const compact = compactSnippet(snippet);
+      if (!snippets.includes(compact)) snippets.push(compact);
+    }
+  }
+
+  const titleSource = first.session_label ?? latestPrompt ?? latestAssistantMessage ?? first.provider_session_id;
+  return {
+    sessionId: first.provider_session_id,
+    provider: first.provider,
+    state: first.session_state,
+    label: first.session_label,
+    firstSeenAt: first.session_first_seen_at,
+    lastSeenAt: first.session_last_seen_at,
+    cwd,
+    repositoryRoot,
+    worktreeRoot,
+    transcriptPath,
+    latestPrompt,
+    latestAssistantMessage,
+    title: compactSnippet(titleSource, 200),
+    matchSnippets: snippets
+  };
+}
+
+function escapeLike(value: string): string {
+  return value.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_");
+}
+
+function searchTerms(query: string): string[] {
+  const ignored = new Set(["component", "session", "section", "working", "work", "please", "find", "recent", "latest"]);
+  const terms = new Set(
+    (query.toLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) ?? []).filter((term) => !ignored.has(term))
+  );
+  if (terms.has("chat")) {
+    terms.add("intake");
+    terms.add("widget");
+  }
+  if (terms.has("web")) terms.add("website");
+  return [...terms].slice(0, 20);
+}
+
+function searchConcept(term: string): string {
+  if (term === "chat" || term === "intake" || term === "widget") return "web-chat";
+  if (term === "web" || term === "website") return "web";
+  return term;
 }
 
 function asIso(value: unknown, fallback: string): string {
@@ -501,6 +620,98 @@ export class Store {
     return (this.database.prepare(sql).all(...values) as EventRow[]).map(eventFromRow);
   }
 
+  getSession(sessionId: string, options: SessionLookupOptions = {}): SessionRecord | null {
+    const clauses = ["e.provider_session_id = ?"];
+    const values: unknown[] = [sessionId];
+    this.addSessionScope(clauses, values, options);
+    const rows = this.database.prepare(`${SESSION_EVENT_SELECT}
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY e.occurred_at DESC, e.observed_at DESC
+      LIMIT 500
+    `).all(...values) as SessionEventRow[];
+    return sessionFromRows(rows, options.repositoryRoot ?? options.worktreeRoot);
+  }
+
+  searchSessions(options: SearchSessionsOptions): SessionRecord[] {
+    const limit = Math.max(1, Math.min(options.limit ?? 10, 100));
+    const terms = searchTerms(options.query);
+    const clauses = ["e.provider_session_id IS NOT NULL", `e.kind IN ('turn.prompted', 'turn.completed', 'session.started', 'session.resumed')`];
+    const values: unknown[] = [];
+    this.addSessionScope(clauses, values, options);
+    if (options.excludeSessionId) {
+      clauses.push("e.provider_session_id != ?");
+      values.push(options.excludeSessionId);
+    }
+    if (terms.length) {
+      clauses.push(`(${terms.map(() => "lower(e.payload_json) LIKE ? ESCAPE '\\'").join(" OR ")})`);
+      values.push(...terms.map((term) => `%${escapeLike(term)}%`));
+    }
+    const rowLimit = Math.min(Math.max(limit * 200, 1_000), 10_000);
+    values.push(rowLimit);
+    const rows = this.database.prepare(`${SESSION_EVENT_SELECT}
+      WHERE ${clauses.join(" AND ")}
+      ORDER BY e.occurred_at DESC, e.observed_at DESC
+      LIMIT ?
+    `).all(...values) as SessionEventRow[];
+
+    const grouped = new Map<string, SessionEventRow[]>();
+    for (const row of rows) {
+      if (!row.provider_session_id) continue;
+      const key = `${row.provider}\u0000${row.provider_session_id}`;
+      const existing = grouped.get(key) ?? [];
+      existing.push(row);
+      grouped.set(key, existing);
+    }
+    const phrase = options.query.trim().toLowerCase();
+    const sessions: SessionRecord[] = [];
+    for (const sessionRows of grouped.values()) {
+      const session = sessionFromRows(sessionRows, options.repositoryRoot ?? options.worktreeRoot);
+      if (!session) continue;
+      const covered = new Set<string>();
+      let bestEventScore = 0;
+      let exactPhrase = false;
+      for (const row of sessionRows) {
+        const payload = row.payload_json.toLowerCase();
+        const weight = row.kind === "turn.prompted" ? 4 : row.kind === "turn.completed" ? 2 : 1;
+        const eventConcepts = new Set<string>();
+        for (const term of terms) {
+          if (payload.includes(term)) {
+            const concept = searchConcept(term);
+            covered.add(concept);
+            eventConcepts.add(concept);
+          }
+        }
+        const eventScore = eventConcepts.size * weight;
+        if (phrase && payload.includes(phrase)) exactPhrase = true;
+        bestEventScore = Math.max(bestEventScore, eventScore);
+      }
+      const score = bestEventScore + covered.size * 5 + (exactPhrase ? 12 : 0);
+      sessions.push({ ...session, score });
+    }
+    return sessions
+      .sort((left, right) => (right.score ?? 0) - (left.score ?? 0) || right.lastSeenAt.localeCompare(left.lastSeenAt))
+      .slice(0, limit);
+  }
+
+  private addSessionScope(clauses: string[], values: unknown[], options: SessionLookupOptions): void {
+    if (options.provider) {
+      clauses.push("e.provider = ?");
+      values.push(options.provider);
+    }
+    const root = options.worktreeRoot ?? options.repositoryRoot;
+    if (!root) return;
+    const prefix = `${escapeLike(root.replace(/\/$/, ""))}/%`;
+    const column = options.worktreeRoot ? "p.worktree_root" : "p.repository_root";
+    clauses.push(`(
+      ${column} = ?
+      OR json_extract(e.payload_json, '$.cwd') = ?
+      OR json_extract(e.payload_json, '$.working_directory') = ?
+      OR json_extract(e.payload_json, '$.cwd') LIKE ? ESCAPE '\\'
+      OR json_extract(e.payload_json, '$.working_directory') LIKE ? ESCAPE '\\'
+    )`);
+    values.push(root, root, root, prefix, prefix);
+  }
+
   private projectCoreEvent(event: AgentEvent): void {
     let sessionRowId: string | null = null;
     if (event.provider_session_id) {
@@ -555,6 +766,21 @@ export class Store {
     `).run(at, reason, processId);
   }
 }
+
+const SESSION_EVENT_SELECT = `
+  SELECT e.*,
+    ps.state AS session_state,
+    ps.label AS session_label,
+    ps.first_seen_at AS session_first_seen_at,
+    ps.last_seen_at AS session_last_seen_at,
+    p.cwd AS process_cwd,
+    p.repository_root AS process_repository_root,
+    p.worktree_root AS process_worktree_root
+  FROM events e
+  JOIN provider_sessions ps
+    ON ps.provider = e.provider AND ps.native_session_id = e.provider_session_id
+  LEFT JOIN process_instances p ON p.id = e.process_instance_id
+`;
 
 function activityForEvent(kind: string): AgentActivity | null {
   if (["turn.started", "turn.prompted", "user.prompt", "prompt.submitted"].includes(kind)) return "thinking";

@@ -40,6 +40,7 @@ export interface NormalizedHookEvent {
 export interface NormalizeHookOptions {
   env?: HookEnvironment;
   now?: Date | string;
+  tty?: string | null;
 }
 
 export interface HookDeliveryResult {

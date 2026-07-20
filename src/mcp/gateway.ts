@@ -76,15 +76,38 @@ export class McpGateway {
   }
 
   async sessionGet(sessionId: string): Promise<unknown> {
-    const [presence, events] = await Promise.all([
-      this.presenceList({ includeExited: true }),
+    const [session, presence, events] = await Promise.all([
+      this.call("session.get", {
+        sessionId,
+        ...(this.identity.repository ? { repositoryRoot: this.identity.repository } : {})
+      }),
+      this.presenceList({ includeExited: true, recentSeconds: 86_400 }),
       this.call("event.list", { providerSessionId: sessionId, limit: 100 })
     ]);
     const process = extractArray(presence, "processes").find((candidate) => {
       if (!candidate || typeof candidate !== "object") return false;
       return (candidate as Record<string, unknown>).providerSessionId === sessionId;
     });
-    return { sessionId, process: process ?? null, events };
+    return { sessionId, session, process: process ?? null, events };
+  }
+
+  sessionSearch(params: Record<string, unknown>): Promise<unknown> {
+    const scope = params.scope && typeof params.scope === "object" && !Array.isArray(params.scope)
+      ? params.scope as Record<string, unknown>
+      : {};
+    const kind = scope.kind;
+    const key = scope.key;
+    return this.call("session.search", {
+      query: params.query,
+      ...(typeof params.provider === "string" ? { provider: params.provider } : {}),
+      ...(typeof params.limit === "number" ? { limit: params.limit } : {}),
+      ...(params.excludeCurrent === false || !this.identity.sessionId ? {} : { excludeSessionId: this.identity.sessionId }),
+      ...(kind === "worktree" && typeof key === "string"
+        ? { worktreeRoot: key }
+        : typeof key === "string"
+          ? { repositoryRoot: key }
+          : {})
+    });
   }
 
   async contextPack(params: Record<string, unknown>): Promise<unknown> {

@@ -25,6 +25,7 @@ const memoryKind = z.enum([
 ]);
 const sensitivity = z.enum(["public", "private", "secret"]);
 const scope = z.object({ kind: scopeKind, key: z.string().min(1) });
+const sessionScope = z.object({ kind: z.enum(["repository", "worktree"]), key: z.string().min(1) });
 
 export function createMcpServer(rpc: RpcClientLike, identity: McpIdentity = {}): McpServer {
   const gateway = new McpGateway(rpc, identity);
@@ -68,6 +69,25 @@ export function createMcpServer(rpc: RpcClientLike, identity: McpIdentity = {}):
       const value = await gateway.sessionGet(sessionId);
       assertSessionResultAccess(value, identity);
       return toolResult(value);
+    }
+  );
+
+  server.registerTool(
+    "session_search",
+    {
+      description: "Search historical provider sessions by user prompts and completion summaries inside one repository or worktree.",
+      inputSchema: {
+        query: z.string().min(1),
+        scope: sessionScope,
+        provider: z.string().optional(),
+        limit: z.number().int().positive().max(100).optional(),
+        excludeCurrent: z.boolean().optional()
+      },
+      annotations: { readOnlyHint: true, idempotentHint: true }
+    },
+    async (args) => {
+      assertScopeAccess(args.scope, identity);
+      return toolResult(await gateway.sessionSearch(args));
     }
   );
 
@@ -513,11 +533,14 @@ function assertSessionResultAccess(value: unknown, identity: McpIdentity): void 
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Session could not be resolved inside this repository");
   }
-  const processRecord = (value as Record<string, unknown>).process;
-  if (!processRecord || typeof processRecord !== "object" || Array.isArray(processRecord)) {
-    throw new Error("Session could not be resolved inside this repository");
-  }
-  const repositoryRoot = (processRecord as Record<string, unknown>).repositoryRoot;
+  const valueRecord = value as Record<string, unknown>;
+  const processRecord = valueRecord.process;
+  const sessionRecord = valueRecord.session;
+  const repositoryRoot = processRecord && typeof processRecord === "object" && !Array.isArray(processRecord)
+    ? (processRecord as Record<string, unknown>).repositoryRoot
+    : sessionRecord && typeof sessionRecord === "object" && !Array.isArray(sessionRecord)
+      ? (sessionRecord as Record<string, unknown>).repositoryRoot
+      : undefined;
   if (typeof repositoryRoot !== "string" || !samePath(repositoryRoot, identity.repository)) {
     throw new Error("Session belongs to another repository");
   }

@@ -13,7 +13,8 @@ describe("hook normalization", () => {
       api_key: "sk-this-value-must-never-be-stored"
     }, {
       now: "2026-07-12T12:00:00Z",
-      env: { AGENTGRAPH_RUN_ID: "run_123" }
+      env: { AGENTGRAPH_RUN_ID: "run_123" },
+      tty: "/dev/ttys009"
     });
 
     expect(event.schema).toBe("local.agent.event/1");
@@ -21,6 +22,7 @@ describe("hook normalization", () => {
     expect(event.provider_session_id).toBe("thr_123");
     expect(event.process_instance_id).toBeNull();
     expect(event.payload.agentgraph_run_id).toBe("run_123");
+    expect(event.payload.agentgraph_hook_tty).toBe("/dev/ttys009");
     expect(event.payload.api_key).toBe("[REDACTED]");
     expect(event.payload.future_field).toEqual({ okay: true });
   });

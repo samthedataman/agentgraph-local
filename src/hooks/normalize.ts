@@ -1,4 +1,5 @@
 import { id, sha256, stableJson } from "../util/ids.js";
+import { currentTty } from "../daemon/process-inspection.js";
 import type {
   HookEnvironment,
   HookProvider,
@@ -137,7 +138,8 @@ export function normalizeHook(
   const payload: Record<string, unknown> = {
     ...sanitized,
     hook_event_name: eventName,
-    agentgraph_run_id: envValue(env, "AGENTGRAPH_RUN_ID")
+    agentgraph_run_id: envValue(env, "AGENTGRAPH_RUN_ID"),
+    agentgraph_hook_tty: options.tty === undefined ? currentTty() : options.tty
   };
   const eventFingerprint = stableJson({
     provider,

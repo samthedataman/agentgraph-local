@@ -9,6 +9,7 @@ This is useful when you want agents to share *selected work context* while you k
 ## What you can do
 
 - See which agent sessions and processes are active in a repository.
+- Search historical Codex and Claude sessions by prompt or completion text, with repository/worktree isolation and resumable session IDs.
 - Save decisions, constraints, facts, procedures, and open questions once and retrieve them from another session.
 - Send a bounded, auditable handoff with evidence and artifacts to an ordinary session's durable inbox.
 - Run a task DAG containing Codex, Claude, and explicitly opted-in Kimi workers with concurrency, timeout, output, artifact, fail-fast, and worktree ownership bounds.
@@ -241,7 +242,7 @@ For a local transport smoke test, bind the hub to loopback and use `http://127.0
 
 ## MCP and A2A
 
-`agentgraph mcp` is a stdio MCP server for Codex and Claude. It exposes focused tools such as `presence_list`, `presence_whoami`, `session_context`, `memory_search`, `memory_commit`, `handoff_create`, `handoff_inbox`, and handoff lifecycle transitions. The MCP process proxies to the daemon and never opens a second SQLite writer.
+`agentgraph mcp` is a stdio MCP server for Codex and Claude. It exposes focused tools such as `presence_list`, `presence_whoami`, `session_search`, `session_context`, `memory_search`, `memory_commit`, `handoff_create`, `handoff_inbox`, and handoff lifecycle transitions. Historical session search uses normalized user prompts and completion summaries already captured by provider hooks; it excludes the calling session by default and returns bounded snippets plus the provider-native resume ID. The MCP process proxies to the daemon and never opens a second SQLite writer.
 
 The optional A2A façade is loopback-only and experimental:
 
@@ -265,6 +266,8 @@ config.json               setup metadata and owned-entry records
 The local alpha trusts software running as the same operating-system user. Scopes reduce accidental cross-repository retrieval but are not a defense against malware already running as that user. Provider authentication, approvals, and sandboxes remain provider-owned. The daemon stores normalized/redacted lifecycle events, not hidden reasoning; redaction cannot guarantee removal of every novel secret format.
 
 The current installer targets macOS. Hooks installed after a session starts cannot always recover its native ID immediately. Existing TUIs use durable pull delivery rather than synthetic keystrokes. Fleet adapters use provider CLIs; deeper App Server/SDK transports can be added behind the same contracts. Remote sync and A2A remain opt-in/experimental boundaries.
+
+Hook telemetry is crash-safe: failed short RPC deliveries spool locally, interrupted `.processing` claims are recovered on daemon restart, and backlog replay runs in bounded background batches so health, presence, and MCP queries stay responsive. A client disconnect or timeout cannot crash the daemon with a late socket write.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), [docs/SECURITY.md](docs/SECURITY.md), and [docs/ROADMAP.md](docs/ROADMAP.md) for implementation boundaries and the release plan.
 

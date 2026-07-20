@@ -17,6 +17,8 @@ import { LeaseReconciler } from "./reconciler.js";
 import { daemonPidRecordMatches, readDaemonPidRecord, writeDaemonPidRecord } from "./pid-file.js";
 
 const MAX_LINE_BYTES = 1_048_576;
+const SPOOL_DRAIN_BATCH_SIZE = 5;
+const SPOOL_DRAIN_INTERVAL_MS = 100;
 
 export interface DaemonServerOptions {
   paths?: AgentGraphPaths;
@@ -52,7 +54,14 @@ function cleanStaleRuntime(paths: AgentGraphPaths): void {
 }
 
 function send(socket: Socket, response: unknown): void {
-  if (!socket.destroyed) socket.write(`${JSON.stringify(response)}\n`);
+  if (socket.destroyed || !socket.writable) return;
+  try {
+    socket.write(`${JSON.stringify(response)}\n`, (error) => {
+      if (error) socket.destroy();
+    });
+  } catch {
+    socket.destroy();
+  }
 }
 
 export async function startDaemonServer(options: DaemonServerOptions = {}): Promise<DaemonServer> {
@@ -103,6 +112,9 @@ export async function startDaemonServer(options: DaemonServerOptions = {}): Prom
   const control: DaemonControl = { shutdown: close };
   server = createServer((socket) => {
     socket.setEncoding("utf8");
+    // A client can time out while a request is still executing. Never let a
+    // late response to that closed peer turn EPIPE into a daemon-wide crash.
+    socket.on("error", () => socket.destroy());
     let buffer = "";
     socket.on("data", (chunk: string) => {
       buffer += chunk;
@@ -153,13 +165,15 @@ export async function startDaemonServer(options: DaemonServerOptions = {}): Prom
     try {
       await drainHookSpool(paths.hookSpoolDir, (event) => {
         store.appendEvent(eventFromParams({ event }, store));
-      });
+      }, SPOOL_DRAIN_BATCH_SIZE);
     } finally {
       drainInFlight = false;
     }
   };
-  await drain();
-  spoolTimer = setInterval(() => void drain().catch(() => undefined), 2_000);
+  // Accept health/presence requests immediately. Large crash-recovery spools
+  // drain in small background batches instead of blocking daemon readiness.
+  setImmediate(() => void drain().catch(() => undefined));
+  spoolTimer = setInterval(() => void drain().catch(() => undefined), SPOOL_DRAIN_INTERVAL_MS);
   spoolTimer.unref();
   return { server, store, dispatcher, paths, close };
 }

@@ -29,6 +29,9 @@ export async function run(args: string[], _json: boolean): Promise<number> {
     repository,
     worktree
   };
-  await startMcpServer(createRpcClient(), identity);
+  // Session/context searches can legitimately scan a mature local event log.
+  // Keep hook ingestion on its separate short timeout, but give interactive
+  // MCP reads enough room to complete without disconnecting mid-response.
+  await startMcpServer(createRpcClient({ timeoutMs: 10_000 }), identity);
   return 0;
 }

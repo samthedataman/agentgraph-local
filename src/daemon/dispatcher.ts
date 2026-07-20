@@ -139,7 +139,7 @@ export function eventFromParams(params: unknown, store: Store): AgentEventInput 
         candidate.host_id ??= store.hostId;
       }
     }
-    if (!candidate.process_instance_id && candidate.source === "hook") {
+    if (!candidate.process_instance_id && candidate.source === "hook" && hookEventIsFresh(candidate, store)) {
       const process = resolveHookProcess(candidate, payload, store);
       if (process) {
         candidate.process_instance_id = process.id;
@@ -149,6 +149,18 @@ export function eventFromParams(params: unknown, store: Store): AgentEventInput 
     }
   }
   return candidate as unknown as AgentEventInput;
+}
+
+function hookEventIsFresh(candidate: Record<string, unknown>, store: Store): boolean {
+  const timestamp = typeof candidate.observed_at === "string"
+    ? candidate.observed_at
+    : typeof candidate.occurred_at === "string"
+      ? candidate.occurred_at
+      : null;
+  if (!timestamp) return true;
+  const eventTime = Date.parse(timestamp);
+  if (!Number.isFinite(eventTime)) return true;
+  return Date.now() - eventTime <= Math.max(60_000, store.leaseDurationMs * 2);
 }
 
 function resolveHookProcess(
@@ -166,6 +178,9 @@ function resolveHookProcess(
     : typeof payload.working_directory === "string"
       ? payload.working_directory
       : null;
+  const hookTty = typeof payload.agentgraph_hook_tty === "string"
+    ? payload.agentgraph_hook_tty
+    : null;
   const repository = cwd ? findRepositoryContext(cwd) : null;
   const known = store.listProcesses({
     provider,
@@ -175,11 +190,22 @@ function resolveHookProcess(
     const exact = known.filter((process) => process.providerSessionId === providerSessionId);
     if (exact.length === 1) return exact[0] ?? null;
   }
-  const sameCwd = cwd ? known.filter((process) => process.cwd === cwd) : known;
+  const sameTerminal = hookTty
+    ? known.filter((process) => process.terminal?.tty === hookTty)
+    : known;
+  const sameCwd = cwd ? sameTerminal.filter((process) => process.cwd === cwd) : sameTerminal;
   if (sameCwd.length === 1) return sameCwd[0] ?? null;
 
-  const discovered = discoverAgentProcesses().filter((process) => {
-    if (process.provider !== provider) return false;
+  // Never run a full-machine provider scan for an ambiguous ordinary hook.
+  // New hooks carry their TTY; legacy/no-TTY hooks remain durable but orphaned
+  // instead of blocking the daemon or guessing among concurrent sessions.
+  if (!hookTty) return null;
+
+  const discovered = discoverAgentProcesses({
+    provider,
+    ...(hookTty ? { tty: hookTty } : {}),
+    ...(cwd ? { cwd } : {})
+  }).filter((process) => {
     if (!cwd) return true;
     if (process.cwd === cwd) return true;
     const processRepository = process.cwd ? findRepositoryContext(process.cwd).repositoryRoot : null;
@@ -313,6 +339,31 @@ export function createCoreDispatcher(store: Store, paths: AgentGraphPaths, confi
     });
   };
   dispatcher.register("event.list", listEvents).register("events.list", listEvents);
+
+  dispatcher.register("session.get", (params) => {
+    const object = objectParams(params);
+    return store.getSession(requiredString(object, "sessionId"), {
+      ...(typeof object.provider === "string" ? { provider: object.provider } : {}),
+      ...(typeof object.repositoryRoot === "string" ? { repositoryRoot: object.repositoryRoot } : {}),
+      ...(typeof object.worktreeRoot === "string" ? { worktreeRoot: object.worktreeRoot } : {})
+    });
+  });
+
+  dispatcher.register("session.search", (params) => {
+    const object = objectParams(params);
+    const limit = object.limit;
+    if (limit !== undefined && (!Number.isInteger(limit) || (limit as number) <= 0 || (limit as number) > 100)) {
+      throw new RpcMethodError(-32602, "limit must be an integer between 1 and 100");
+    }
+    return store.searchSessions({
+      query: requiredString(object, "query"),
+      ...(typeof object.provider === "string" ? { provider: object.provider } : {}),
+      ...(typeof object.repositoryRoot === "string" ? { repositoryRoot: object.repositoryRoot } : {}),
+      ...(typeof object.worktreeRoot === "string" ? { worktreeRoot: object.worktreeRoot } : {}),
+      ...(typeof object.excludeSessionId === "string" ? { excludeSessionId: object.excludeSessionId } : {}),
+      ...(typeof limit === "number" ? { limit } : {})
+    });
+  });
 
   dispatcher.register("daemon.shutdown", (_params, context) => {
     setImmediate(() => void context.control.shutdown());

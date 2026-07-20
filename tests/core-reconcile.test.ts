@@ -59,4 +59,32 @@ describe("lease reconciliation", () => {
     store.appendEvent(event);
     expect(store.getProcessById(presence.id)?.providerSessionId).toBe("claude:ordinary");
   });
+
+  it("does not attach a replayed historical hook to an unrelated current process", () => {
+    const store = new Store(":memory:", { hostId: "host_historical_hook" });
+    stores.push(store);
+    store.registerProcess({
+      runId: "run_current",
+      leaseToken: "lease",
+      provider: "claude",
+      mode: "attached",
+      pid: 4569,
+      processStartToken: "birth-token-3",
+      executable: "claude",
+      cwd: "/tmp/shared-repository"
+    }, { confidence: "heuristic" });
+
+    const event = eventFromParams({
+      event: {
+        provider: "claude",
+        source: "hook",
+        provider_session_id: "claude:historical",
+        occurred_at: "2020-01-01T00:00:00.000Z",
+        observed_at: "2020-01-01T00:00:00.000Z",
+        kind: "turn.completed",
+        payload: { cwd: "/tmp/shared-repository" }
+      }
+    }, store);
+    expect(event.process_instance_id).toBeUndefined();
+  });
 });

@@ -105,4 +105,42 @@ describe("core Store", () => {
     expect(store.listEvents()[0]?.process_instance_id).toBe(presence.id);
     expect(store.getProcessById(presence.id)?.providerSessionId).toBe("thr_early");
   });
+
+  it("searches historical sessions by prompt within repository scope", () => {
+    const store = makeStore();
+    store.appendEvent({
+      provider: "codex",
+      source: "hook",
+      provider_session_id: "thr_legalvoice",
+      occurred_at: "2026-07-15T20:00:00Z",
+      kind: "turn.prompted",
+      payload: {
+        cwd: "/tmp/project",
+        transcript_path: "/tmp/codex/thr_legalvoice.jsonl",
+        prompt: "Simplify the LegalVoice web intake chat component without removing functionality"
+      }
+    });
+    store.appendEvent({
+      provider: "codex",
+      source: "hook",
+      provider_session_id: "thr_other",
+      occurred_at: "2026-07-16T20:00:00Z",
+      kind: "turn.prompted",
+      payload: { cwd: "/tmp/other", prompt: "Unrelated newer session" }
+    });
+
+    expect(store.searchSessions({
+      query: "LegalVoice web chat",
+      repositoryRoot: "/tmp/project"
+    })).toMatchObject([{
+      sessionId: "thr_legalvoice",
+      repositoryRoot: "/tmp/project",
+      transcriptPath: "/tmp/codex/thr_legalvoice.jsonl"
+    }]);
+    expect(store.getSession("thr_legalvoice", { repositoryRoot: "/tmp/project" })).toMatchObject({
+      title: "Simplify the LegalVoice web intake chat component without removing functionality",
+      latestPrompt: "Simplify the LegalVoice web intake chat component without removing functionality"
+    });
+    expect(store.getSession("thr_legalvoice", { repositoryRoot: "/tmp/other" })).toBeNull();
+  });
 });

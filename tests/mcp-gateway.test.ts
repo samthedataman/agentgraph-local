@@ -36,6 +36,26 @@ describe("McpGateway", () => {
     );
   });
 
+  it("searches historical sessions in scope and excludes the caller by default", async () => {
+    const rpc = vi.fn(async (method: string, params?: unknown) => ({ method, params }));
+    const gateway = new McpGateway(rpc, {
+      sessionId: "codex:current",
+      repository: "/repo",
+      worktree: "/repo"
+    });
+    await gateway.sessionSearch({
+      query: "LegalVoice web chat",
+      scope: { kind: "repository", key: "/repo" },
+      limit: 5
+    });
+    expect(rpc).toHaveBeenCalledWith("session.search", {
+      query: "LegalVoice web chat",
+      repositoryRoot: "/repo",
+      excludeSessionId: "codex:current",
+      limit: 5
+    });
+  });
+
   it("resolves an ordinary caller from one live provider session in the same repository", async () => {
     const rpc = vi.fn(async () => [{
       runId: "attached_run",
