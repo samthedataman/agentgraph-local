@@ -33,6 +33,37 @@ export function getProcessExecutable(pid: number): string | null {
   return ps(["-p", String(pid), "-o", "comm="]);
 }
 
+export function getProcessCommand(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  return ps(["-p", String(pid), "-o", "command="]);
+}
+
+/**
+ * Desktop app servers such as `codex app-server` run many provider sessions in
+ * one long-lived process; a CLI or `claude --output-format stream-json` process
+ * runs one session at a time.
+ */
+export function isMultiSessionHost(command: string): boolean {
+  return /\sapp-server(?:\s|$)/.test(command);
+}
+
+/**
+ * Walks from `startPid` toward init and returns the nearest process running the
+ * provider. Desktop apps run hooks without a TTY, so this parent chain is the
+ * only exact link between a hook and the agent process that fired it.
+ */
+export function findProviderAncestor(provider: Provider, startPid = process.ppid, maxDepth = 6): number | null {
+  let pid = startPid;
+  for (let depth = 0; depth < maxDepth && Number.isInteger(pid) && pid > 1; depth += 1) {
+    const line = ps(["-p", String(pid), "-o", "ppid=,command="]);
+    const match = line ? /^\s*(\d+)\s+(.+)$/.exec(line) : null;
+    if (!match) return null;
+    if (providerForCommand(match[2]!) === provider) return pid;
+    pid = Number(match[1]);
+  }
+  return null;
+}
+
 export function currentTty(pid = process.pid): string | null {
   const value = ps(["-p", String(pid), "-o", "tty="]);
   if (!value || value === "??" || value === "?") return null;
@@ -51,17 +82,43 @@ export function terminalFingerprint(env: NodeJS.ProcessEnv = process.env, pid = 
   };
 }
 
-export function providerForCommand(command: string): Provider | null {
-  const tokens = command.trim().split(/\s+/);
-  const executable = basename(tokens[0] ?? "").toLowerCase();
-  const launched = ["node", "nodejs", "bun", "deno"].includes(executable)
-    ? basename(tokens[1] ?? "").toLowerCase()
-    : executable;
-  if (launched === "codex" || launched === "codex.js") return "codex";
-  if (launched === "claude" || launched === "claude.js" || launched === "claude-code" || launched === "claude-code.js") {
-    return "claude";
+const PROVIDER_EXECUTABLES = new Map<string, Provider>([
+  ["codex", "codex"],
+  ["codex.js", "codex"],
+  ["claude", "claude"],
+  ["claude.js", "claude"],
+  ["claude-code", "claude"],
+  ["claude-code.js", "claude"]
+]);
+const SCRIPT_LAUNCHERS = new Set(["node", "nodejs", "bun", "deno"]);
+
+/**
+ * `ps` prints argv joined by spaces, so an absolute path containing a space
+ * ("Application Support") spans several tokens. Extend the leading path until
+ * a token names a provider or launcher, stopping at the first option.
+ */
+function leadingExecutable(tokens: string[]): { name: string; rest: string[] } {
+  const first = tokens[0] ?? "";
+  if (first.startsWith("/")) {
+    for (let index = 0; index < tokens.length; index += 1) {
+      const name = basename(tokens.slice(0, index + 1).join(" "));
+      if (PROVIDER_EXECUTABLES.has(name) || SCRIPT_LAUNCHERS.has(name)) {
+        return { name, rest: tokens.slice(index + 1) };
+      }
+      if (tokens[index + 1]?.startsWith("-")) break;
+    }
   }
-  return null;
+  return { name: basename(first), rest: tokens.slice(1) };
+}
+
+/**
+ * Matching is case-sensitive: the Codex desktop app's helper processes live
+ * under "Codex Framework.framework" and must not be mistaken for the CLI.
+ */
+export function providerForCommand(command: string): Provider | null {
+  const { name, rest } = leadingExecutable(command.trim().split(/\s+/));
+  const launched = SCRIPT_LAUNCHERS.has(name) ? basename(rest[0] ?? "") : name;
+  return PROVIDER_EXECUTABLES.get(launched) ?? null;
 }
 
 export interface DiscoverAgentProcessOptions {

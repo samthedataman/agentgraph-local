@@ -91,6 +91,69 @@ async function mcpCheck(
   }
 }
 
+function supportedNode(version: string): boolean {
+  const [major = 0, minor = 0] = version.replace(/^v/, "").split(".").slice(0, 2).map((part) => Number.parseInt(part, 10));
+  return major > 20 || (major === 20 && minor >= 19);
+}
+
+/** The Node binary pinned as the first ProgramArguments entry of the LaunchAgent. */
+export function launchAgentNode(content: string): string | null {
+  const match = /<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/.exec(content);
+  return match?.[1]?.replaceAll("&amp;", "&") ?? null;
+}
+
+/**
+ * The daemon and hooks run on the Node pinned at setup, not on whatever `node`
+ * the current shell resolves. Only fail when the pinned runtime is too old.
+ */
+async function nodeCheck(
+  home: string,
+  platform: NodeJS.Platform,
+  runner: CommandRunner,
+  env: NodeJS.ProcessEnv
+): Promise<DoctorCheck> {
+  const current = process.versions.node;
+  if (supportedNode(current)) return { name: "runtime.node", status: "pass", message: `Node ${current}` };
+  const pinned = platform === "darwin"
+    ? await readFile(launchAgentPath(home), "utf8").then(launchAgentNode, () => null)
+    : null;
+  if (pinned) {
+    try {
+      const result = await runner(pinned, ["--version"], { timeoutMs: 5_000, env });
+      const version = result.stdout.trim();
+      if (result.code === 0 && supportedNode(version)) {
+        return {
+          name: "runtime.node",
+          status: "warn",
+          message: `This shell runs Node ${current}; the daemon and hooks use ${version} at ${pinned}. `
+            + `Run CLI commands with that Node (for example \`${pinned} $(command -v agentgraph)\`).`
+        };
+      }
+    } catch {
+      // Fall through to the failure below.
+    }
+  }
+  return { name: "runtime.node", status: "fail", message: `AgentGraph requires Node 20.19 or newer (found ${current})` };
+}
+
+/** Warns when hooks record sessions that presence cannot attach to a live process. */
+function presenceCheck(details: unknown): DoctorCheck {
+  const gaps = details && typeof details === "object" && Array.isArray((details as { presenceGaps?: unknown }).presenceGaps)
+    ? (details as { presenceGaps: unknown[] }).presenceGaps
+    : null;
+  if (gaps === null) {
+    return { name: "presence.coverage", status: "warn", message: "Daemon does not report presence coverage; restart it after upgrading" };
+  }
+  return gaps.length === 0
+    ? { name: "presence.coverage", status: "pass", message: "Every recently active session has live presence" }
+    : {
+        name: "presence.coverage",
+        status: "warn",
+        message: `${gaps.length} session(s) active in the last 10 minutes have no live presence`,
+        details: gaps
+      };
+}
+
 export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorReport> {
   const env = options.env ?? process.env;
   const home = options.home ?? env.HOME ?? homedir();
@@ -98,14 +161,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   const runner = options.runner ?? runCommand;
   const checks: DoctorCheck[] = [];
 
-  const [nodeMajor = 0, nodeMinor = 0] = process.versions.node
-    .split(".")
-    .slice(0, 2)
-    .map((part) => Number.parseInt(part, 10));
-  const supportedNode = nodeMajor > 20 || (nodeMajor === 20 && nodeMinor >= 19);
-  checks.push(supportedNode
-    ? { name: "runtime.node", status: "pass", message: `Node ${process.versions.node}` }
-    : { name: "runtime.node", status: "fail", message: "AgentGraph requires Node 20.19 or newer" });
+  checks.push(await nodeCheck(home, platform, runner, env));
 
   const [codexPath, claudePath] = await Promise.all([
     findVendorExecutable("codex", env),
@@ -122,6 +178,7 @@ export async function runDoctor(options: DoctorOptions = {}): Promise<DoctorRepo
   try {
     const details = await health();
     checks.push({ name: "daemon", status: "pass", message: "Daemon is responding", details });
+    checks.push(presenceCheck(details));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     checks.push({

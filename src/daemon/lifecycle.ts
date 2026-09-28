@@ -44,7 +44,9 @@ export async function ensureDaemonRunning(paths: AgentGraphPaths = getPaths()): 
   } catch {
     spawnDaemonDetached();
   }
-  const deadline = Date.now() + 4_000;
+  // Normal startup takes well under a second, but a migration or a session
+  // digest rebuild over a multi-GB event log can take tens of seconds.
+  const deadline = Date.now() + 45_000;
   let lastError: unknown;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 50));

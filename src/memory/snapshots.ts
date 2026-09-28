@@ -16,6 +16,19 @@ interface SnapshotRow {
   updated_at: string;
 }
 
+interface DigestRow {
+  provider: string;
+  cwd: string | null;
+  repository_root: string | null;
+  objective: string | null;
+  latest_prompt: string | null;
+  latest_assistant_message: string | null;
+  activity: string | null;
+  prompt_count: number;
+  automated_prompt_count: number;
+  last_event_at: string;
+}
+
 export class SessionSnapshotStore {
   constructor(
     readonly database: SqliteDatabase,
@@ -58,11 +71,47 @@ export class SessionSnapshotStore {
     return snapshot;
   }
 
+  /**
+   * Explicit snapshots win. Otherwise derive one from the core store's
+   * `session_digests` projection so every observed session has a summary.
+   */
   get(sessionId: string): SessionSnapshot | null {
     const row = this.database.prepare("SELECT * FROM ag_session_snapshots WHERE session_id = ?").get(sessionId) as
       | SnapshotRow
       | undefined;
-    return row ? mapSnapshot(row) : null;
+    return row ? mapSnapshot(row) : this.derived(sessionId);
+  }
+
+  private derived(sessionId: string): SessionSnapshot | null {
+    let digest: DigestRow | undefined;
+    try {
+      digest = this.database.prepare(
+        `SELECT provider, cwd, repository_root, objective, latest_prompt, latest_assistant_message,
+           activity, prompt_count, automated_prompt_count, last_event_at
+         FROM session_digests WHERE native_session_id = ? ORDER BY last_event_at DESC LIMIT 1`
+      ).get(sessionId) as DigestRow | undefined;
+    } catch {
+      // A memory-only database (tests, remote hub) has no core projection.
+      return null;
+    }
+    const scopeKey = digest?.repository_root ?? digest?.cwd;
+    if (!digest || !scopeKey) return null;
+    return {
+      sessionId,
+      scope: { kind: "repository", key: scopeKey },
+      activity: digest.activity,
+      objective: digest.objective ?? digest.latest_prompt,
+      summary: digest.latest_assistant_message,
+      sourceEventId: null,
+      metadata: {
+        derived: true,
+        provider: digest.provider,
+        latestPrompt: digest.latest_prompt,
+        promptCount: digest.prompt_count,
+        automatedPromptCount: digest.automated_prompt_count
+      },
+      updatedAt: digest.last_event_at
+    };
   }
 
   list(scope: MemoryScope, limit = 20): SessionSnapshot[] {

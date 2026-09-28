@@ -41,6 +41,8 @@ export interface NormalizeHookOptions {
   env?: HookEnvironment;
   now?: Date | string;
   tty?: string | null;
+  /** PID of the provider process that ran the hook; resolved from the parent chain when omitted. */
+  hostPid?: number | null;
 }
 
 export interface HookDeliveryResult {

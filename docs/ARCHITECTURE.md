@@ -23,6 +23,8 @@
 
 Codex and Claude command hooks send short lifecycle envelopes to the daemon. They correlate the provider-native session and turn IDs with `AGENTGRAPH_RUN_ID`. Hooks spool events to disk if the daemon is unavailable.
 
+Unsupervised sessions (the Codex and Claude desktop apps, or a CLI started without the wrapper) have no run id, and desktop hooks have no TTY. On session start, prompt submit, turn end, and subagent start, the hook walks its parent chain to the nearest provider process and records it as `agentgraph_host_pid`. The daemon verifies that PID's birth token and command before attaching it with `hook_seen` confidence. Without a TTY or host PID the daemon never moves a single-session process to a different session on a cwd guess. Tool payload strings are capped at 4 KB (32 KB elsewhere); the provider transcript remains the full record.
+
 ### Daemon
 
 The daemon listens on an owner-only Unix socket. It performs migrations, process reconciliation, event sequencing, state projection, memory queries, and handoff state transitions.
@@ -30,6 +32,10 @@ The daemon listens on an owner-only Unix socket. It performs migrations, process
 ### Store
 
 SQLite runs in WAL mode. Operational tables represent hosts, terminals, processes, sessions, attachments, turns, subagents, and events. Domain tables represent memories, graph edges, artifacts, and handoffs.
+
+`session_digests` holds one bounded row per provider session (cwd, repository, first human prompt as the objective, latest prompt and answer, prompt counts, and a rolling 16 KB search text). It is folded from each event on insert and rebuilt once when introduced. Session search, `session.get`, and derived session snapshots read it instead of the raw event log, so their cost tracks session count rather than event volume. Scheduled automation prompts (Codex heartbeats) are counted but never become the objective.
+
+`health` reports `presenceGaps`: sessions with events in the last ten minutes but no live attachment. `agentgraph doctor` surfaces them as `presence.coverage`.
 
 ### MCP proxy
 
@@ -77,6 +83,8 @@ host
 ```
 
 A provider session may be resumed by another process later, and one process may attach to several sessions over its lifetime.
+
+A multi-session host (`codex app-server`, flagged `multiSession` in process metadata) holds one active attachment per session at the same time, each with its own cwd, repository, activity, and last event. Presence lists one row per hosted session and hides a host with none. The reconciler detaches hosted sessions idle for two hours; their next event reattaches them. Single-session processes keep one active attachment and switch on a new session.
 
 ## State model
 

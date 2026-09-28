@@ -15,7 +15,14 @@ import type { Store } from "../store/store.js";
 import { VERSION } from "../version.js";
 import type { AgentGraphPaths } from "../config/paths.js";
 import type { AgentGraphConfig } from "../config/config.js";
-import { discoverAgentProcesses, executableName } from "./process-inspection.js";
+import {
+  discoverAgentProcesses,
+  executableName,
+  getProcessCommand,
+  getProcessStartToken,
+  isMultiSessionHost,
+  providerForCommand
+} from "./process-inspection.js";
 import { findRepositoryContext } from "./repository.js";
 import { reconcileLeases } from "./reconciler.js";
 
@@ -190,10 +197,24 @@ function resolveHookProcess(
     const exact = known.filter((process) => process.providerSessionId === providerSessionId);
     if (exact.length === 1) return exact[0] ?? null;
   }
+
+  // Desktop apps run hooks without a TTY; the hook names its host process.
+  const hostPid = typeof payload.agentgraph_host_pid === "number" ? payload.agentgraph_host_pid : null;
+  if (hostPid) {
+    const hosted = resolveHookHost(store, provider, hostPid, cwd);
+    if (hosted) return hosted;
+  }
+
   const sameTerminal = hookTty
     ? known.filter((process) => process.terminal?.tty === hookTty)
     : known;
-  const sameCwd = cwd ? sameTerminal.filter((process) => process.cwd === cwd) : sameTerminal;
+  const sameCwd = (cwd ? sameTerminal.filter((process) => process.cwd === cwd) : sameTerminal)
+    // Without a TTY or host PID, never move a single-session process that is
+    // already attached to a different session: that is a guess, not evidence.
+    .filter((process) => hookTty
+      || process.metadata.multiSession === true
+      || !process.providerSessionId
+      || process.providerSessionId === providerSessionId);
   if (sameCwd.length === 1) return sameCwd[0] ?? null;
 
   // Never run a full-machine provider scan for an ambiguous ordinary hook.
@@ -215,12 +236,53 @@ function resolveHookProcess(
   return attachDiscoveredProcess(store, discovered[0]!, cwd ?? undefined, "hook_seen", true);
 }
 
+const LIVE_STATES = new Set(["starting", "live", "stale"]);
+
+/**
+ * Attaches the exact provider process that ran a hook. The PID comes from the
+ * hook's own parent chain and is verified here, so no machine scan is needed.
+ */
+export function resolveHookHost(
+  store: Store,
+  provider: string,
+  hostPid: number,
+  cwd: string | null,
+  inspect: HostInspector = { startToken: getProcessStartToken, command: getProcessCommand }
+): ProcessPresence | null {
+  if (!Number.isInteger(hostPid) || hostPid <= 1) return null;
+  const known = store.getProcessByPid(hostPid);
+  if (known && known.provider === provider && LIVE_STATES.has(known.state)) return known;
+
+  const processStartToken = inspect.startToken(hostPid);
+  const command = processStartToken ? inspect.command(hostPid) : null;
+  if (!processStartToken || !command || providerForCommand(command) !== provider) return null;
+  const existing = store.getProcessByPid(hostPid, processStartToken);
+  if (existing) {
+    store.touchAttachedProcess(existing.id);
+    return store.getProcessById(existing.id);
+  }
+  return attachDiscoveredProcess(
+    store,
+    { pid: hostPid, parentPid: null, provider, command, cwd, tty: null, processStartToken },
+    cwd ?? undefined,
+    "hook_seen",
+    true,
+    { multiSession: isMultiSessionHost(command) }
+  );
+}
+
+export interface HostInspector {
+  startToken(pid: number): string | null;
+  command(pid: number): string | null;
+}
+
 function attachDiscoveredProcess(
   store: Store,
   discovered: DiscoveredProcess,
   preferredCwd?: string,
   confidence: "heuristic" | "hook_seen" = "heuristic",
-  autoAttachedFromHook = false
+  autoAttachedFromHook = false,
+  extraMetadata: Record<string, unknown> = {}
 ): ProcessPresence {
   const existing = store.getProcessByPid(discovered.pid, discovered.processStartToken);
   if (existing) return existing;
@@ -247,7 +309,7 @@ function attachDiscoveredProcess(
     repositoryRoot: repository.repositoryRoot,
     worktreeRoot: repository.worktreeRoot,
     terminal,
-    metadata: { autoAttachedFromHook }
+    metadata: { autoAttachedFromHook, ...extraMetadata }
   }, { confidence, activity: "unknown" });
 }
 
@@ -262,6 +324,9 @@ export function createCoreDispatcher(store: Store, paths: AgentGraphPaths, confi
     databasePath: context.paths.databasePath,
     socketPath: context.paths.socketPath,
     liveProcesses: context.store.listProcesses().length,
+    // Sessions active in the last 10 minutes with no live process: hooks are
+    // arriving but presence cannot see the agent. `doctor` reports these.
+    presenceGaps: context.store.presenceGaps(new Date(Date.now() - 10 * 60_000).toISOString()),
     now: context.requestedAt
   });
   dispatcher.register("health", health).register("ping", health);

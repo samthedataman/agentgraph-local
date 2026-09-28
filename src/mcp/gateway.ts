@@ -8,6 +8,8 @@ export interface McpIdentity {
   provider?: string;
   repository?: string;
   worktree?: string;
+  /** PID of the provider process that launched this MCP server. */
+  hostPid?: number;
 }
 
 /** Testable, transport-independent mapping between MCP concepts and daemon RPC. */
@@ -40,6 +42,15 @@ export class McpGateway {
         (this.identity.sessionId !== undefined && item.providerSessionId === this.identity.sessionId)
       );
     }) as Record<string, unknown> | undefined;
+    if (!match && this.identity.hostPid !== undefined) {
+      // A single-session host (a CLI or desktop `claude` process) owns exactly
+      // one attachment; a multi-session app server stays ambiguous.
+      const hosted = processes.filter((candidate): candidate is Record<string, unknown> =>
+        Boolean(candidate) && typeof candidate === "object"
+        && (candidate as Record<string, unknown>).pid === this.identity.hostPid
+        && typeof (candidate as Record<string, unknown>).providerSessionId === "string");
+      if (hosted.length === 1) match = hosted[0];
+    }
     if (!match) {
       const candidates = processes.filter((candidate): candidate is Record<string, unknown> => {
         if (!candidate || typeof candidate !== "object") return false;

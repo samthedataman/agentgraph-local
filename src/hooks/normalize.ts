@@ -1,5 +1,6 @@
 import { id, sha256, stableJson } from "../util/ids.js";
-import { currentTty } from "../daemon/process-inspection.js";
+import { redactSecrets } from "../util/redact.js";
+import { currentTty, findProviderAncestor } from "../daemon/process-inspection.js";
 import type {
   HookEnvironment,
   HookProvider,
@@ -9,7 +10,20 @@ import type {
 } from "./types.js";
 
 const MAX_STRING_LENGTH = 32_768;
-const SECRET_VALUE = /\b(?:sk-[A-Za-z0-9_-]{16,}|gh[opusr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{16,}|AKIA[A-Z0-9]{16}|Bearer\s+[A-Za-z0-9._~+\/-]{12,}|eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b/g;
+// Tool inputs and outputs were ~70% of a mature event log. Keep enough to see
+// what ran; the provider transcript remains the full record.
+const MAX_TOOL_STRING_LENGTH = 4_096;
+const TOOL_EVENTS = new Set([
+  "PreToolUse",
+  "PostToolUse",
+  "PostToolUseFailure",
+  "PostToolBatch",
+  "PermissionRequest",
+  "PermissionDenied"
+]);
+// Resolving the host process costs a few `ps` calls, so do it only on events
+// that start or advance a turn. Later tool events match by session id.
+const HOST_LOOKUP_EVENTS = new Set(["SessionStart", "UserPromptSubmit", "Stop", "SubagentStart"]);
 
 const EVENT_KINDS: Record<string, string> = {
   SessionStart: "session.started",
@@ -50,11 +64,11 @@ function isoTime(value: unknown, fallback: string): string {
   return Number.isNaN(parsed.valueOf()) ? fallback : parsed.toISOString();
 }
 
-function redactString(value: string): string {
-  const bounded = value.length > MAX_STRING_LENGTH
-    ? `${value.slice(0, MAX_STRING_LENGTH)}…[truncated]`
+function redactString(value: string, maxLength: number): string {
+  const bounded = value.length > maxLength
+    ? `${value.slice(0, maxLength)}…[truncated]`
     : value;
-  return bounded.replaceAll(SECRET_VALUE, "[REDACTED]");
+  return redactSecrets(bounded);
 }
 
 function sensitiveKey(key: string): boolean {
@@ -71,17 +85,17 @@ function sensitiveKey(key: string): boolean {
 }
 
 /** Redact credential-looking fields while retaining unknown fields for forward compatibility. */
-export function sanitizeHookValue(value: unknown, key = "", depth = 0): unknown {
+export function sanitizeHookValue(value: unknown, key = "", depth = 0, maxLength = MAX_STRING_LENGTH): unknown {
   if (depth > 12) return "[depth-limit]";
   if (sensitiveKey(key)) return "[REDACTED]";
-  if (typeof value === "string") return redactString(value);
+  if (typeof value === "string") return redactString(value, maxLength);
   if (Array.isArray(value)) {
-    return value.slice(0, 1_000).map((entry) => sanitizeHookValue(entry, "", depth + 1));
+    return value.slice(0, 1_000).map((entry) => sanitizeHookValue(entry, "", depth + 1, maxLength));
   }
   if (value !== null && typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>).slice(0, 1_000)) {
-      output[childKey] = sanitizeHookValue(childValue, childKey, depth + 1);
+      output[childKey] = sanitizeHookValue(childValue, childKey, depth + 1, maxLength);
     }
     return output;
   }
@@ -128,18 +142,27 @@ export function normalizeHook(
   const env = options.env ?? (process.env as HookEnvironment);
   const observedAt = normalizedNow(options.now);
   const eventName = resolveEventName(input);
-  const sanitized = sanitizeHookValue(input) as Record<string, unknown>;
+  const maxLength = TOOL_EVENTS.has(eventName) ? MAX_TOOL_STRING_LENGTH : MAX_STRING_LENGTH;
+  const sanitized = sanitizeHookValue(input, "", 0, maxLength) as Record<string, unknown>;
   const providerSessionId = asString(input.session_id) ?? null;
   const turnId = asString(input.turn_id) ?? null;
   // This is the store's internal process row id, not the wrapper run id. The
   // latter remains in payload for correlation until a daemon resolves it.
   const processInstanceId = envValue(env, "AGENTGRAPH_PROCESS_INSTANCE_ID");
+  const runId = envValue(env, "AGENTGRAPH_RUN_ID");
+  // Supervised hooks already carry their run id; everything else needs the host.
+  const hostPid = options.hostPid !== undefined
+    ? options.hostPid
+    : !runId && !processInstanceId && HOST_LOOKUP_EVENTS.has(eventName)
+      ? findProviderAncestor(provider)
+      : null;
 
   const payload: Record<string, unknown> = {
     ...sanitized,
     hook_event_name: eventName,
-    agentgraph_run_id: envValue(env, "AGENTGRAPH_RUN_ID"),
-    agentgraph_hook_tty: options.tty === undefined ? currentTty() : options.tty
+    agentgraph_run_id: runId,
+    agentgraph_hook_tty: options.tty === undefined ? currentTty() : options.tty,
+    agentgraph_host_pid: hostPid
   };
   const eventFingerprint = stableJson({
     provider,

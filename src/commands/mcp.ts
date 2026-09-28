@@ -27,7 +27,8 @@ export async function run(args: string[], _json: boolean): Promise<number> {
     ...(process.env.AGENTGRAPH_SESSION_ID ? { sessionId: process.env.AGENTGRAPH_SESSION_ID } : {}),
     ...(provider ? { provider } : {}),
     repository,
-    worktree
+    worktree,
+    hostPid: process.ppid
   };
   // Session/context searches can legitimately scan a mature local event log.
   // Keep hook ingestion on its separate short timeout, but give interactive

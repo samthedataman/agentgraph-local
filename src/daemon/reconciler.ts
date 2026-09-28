@@ -7,6 +7,7 @@ export interface ReconcileResult {
   refreshed: number;
   stale: number;
   exited: number;
+  idleDetached: number;
 }
 
 export type ProcessMatcher = (pid: number, processStartToken: string) => boolean;
@@ -16,7 +17,8 @@ export function reconcileLeases(
   at = nowIso(),
   matches: ProcessMatcher = processMatches
 ): ReconcileResult {
-  const result: ReconcileResult = { checked: 0, refreshed: 0, stale: 0, exited: 0 };
+  const result: ReconcileResult = { checked: 0, refreshed: 0, stale: 0, exited: 0, idleDetached: 0 };
+  result.idleDetached = store.detachIdleHostedSessions(at);
   for (const presence of store.expiredProcesses(at)) {
     result.checked += 1;
     const sameProcess = matches(presence.pid, presence.processStartToken);

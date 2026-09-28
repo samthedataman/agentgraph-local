@@ -156,10 +156,53 @@ export const CORE_MIGRATIONS: readonly Migration[] = [
         received_at TEXT NOT NULL
       );
     `
+  },
+  {
+    version: 2,
+    name: "multi-session hosts and session digests",
+    sql: `
+      -- Desktop app servers (for example \`codex app-server\`) host many provider
+      -- sessions in one process, so one process may hold several attachments.
+      -- Single-session processes still switch attachments in Store code.
+      DROP INDEX IF EXISTS session_attachments_one_active_process_idx;
+      CREATE UNIQUE INDEX IF NOT EXISTS session_attachments_active_pair_idx
+        ON session_attachments(process_instance_id, provider_session_id) WHERE detached_at IS NULL;
+      ALTER TABLE session_attachments ADD COLUMN cwd TEXT;
+      ALTER TABLE session_attachments ADD COLUMN repository_root TEXT;
+      ALTER TABLE session_attachments ADD COLUMN worktree_root TEXT;
+      ALTER TABLE session_attachments ADD COLUMN activity TEXT;
+      ALTER TABLE session_attachments ADD COLUMN last_event_at TEXT;
+
+      -- One bounded row per provider session so search and snapshots never
+      -- scan the raw event log.
+      CREATE TABLE IF NOT EXISTS session_digests (
+        provider TEXT NOT NULL,
+        native_session_id TEXT NOT NULL,
+        cwd TEXT,
+        repository_root TEXT,
+        worktree_root TEXT,
+        transcript_path TEXT,
+        objective TEXT,
+        latest_prompt TEXT,
+        latest_assistant_message TEXT,
+        prompt_count INTEGER NOT NULL DEFAULT 0,
+        automated_prompt_count INTEGER NOT NULL DEFAULT 0,
+        activity TEXT,
+        search_text TEXT NOT NULL DEFAULT '',
+        first_event_at TEXT NOT NULL,
+        last_event_at TEXT NOT NULL,
+        PRIMARY KEY(provider, native_session_id)
+      );
+      CREATE INDEX IF NOT EXISTS session_digests_last_idx
+        ON session_digests(last_event_at DESC);
+      CREATE INDEX IF NOT EXISTS session_digests_native_idx
+        ON session_digests(native_session_id);
+    `
   }
 ] as const;
 
-export function migrate(database: Database.Database, migrations: readonly Migration[] = CORE_MIGRATIONS): void {
+/** Applies pending migrations and returns the versions applied by this call. */
+export function migrate(database: Database.Database, migrations: readonly Migration[] = CORE_MIGRATIONS): number[] {
   database.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
@@ -177,8 +220,12 @@ export function migrate(database: Database.Database, migrations: readonly Migrat
       .run(migration.version, migration.name, new Date().toISOString());
   });
 
+  const newlyApplied: number[] = [];
   for (const migration of [...migrations].sort((left, right) => left.version - right.version)) {
-    if (!applied.has(migration.version)) apply(migration);
+    if (applied.has(migration.version)) continue;
+    apply(migration);
+    newlyApplied.push(migration.version);
   }
+  return newlyApplied;
 }
 
