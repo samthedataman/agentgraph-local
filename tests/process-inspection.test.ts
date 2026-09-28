@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { preferProviderLeafProcesses, providerForCommand } from "../src/daemon/process-inspection.js";
+import { executableName, preferProviderLeafProcesses, providerForCommand } from "../src/daemon/process-inspection.js";
 import type { DiscoveredProcess } from "../src/protocol/types.js";
 
 function processRecord(overrides: Partial<DiscoveredProcess>): DiscoveredProcess {
@@ -37,6 +37,9 @@ describe("agent process discovery", () => {
     expect(providerForCommand(
       "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/153/Helpers/browser_crashpad_handler --monitor-self"
     )).toBeNull();
+    expect(executableName(
+      "/Users/me/Library/Application Support/Claude/claude-code/2.1.281/claude.app/Contents/MacOS/claude --output-format stream-json"
+    )).toBe("claude");
   });
 
   it("collapses a provider launcher while preserving separate terminals", () => {

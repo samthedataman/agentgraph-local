@@ -201,6 +201,6 @@ export function preferProviderLeafProcesses(processes: DiscoveredProcess[]): Dis
 }
 
 export function executableName(command: string): string {
-  const first = command.trim().split(/\s+/, 1)[0];
-  return first ? basename(first) : command;
+  const { name } = leadingExecutable(command.trim().split(/\s+/));
+  return name || command;
 }
